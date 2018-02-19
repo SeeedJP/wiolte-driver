@@ -995,3 +995,342 @@ bool WioLTE::HttpPost(const char* url, const char* data, int* responseCode)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
+//     IoTHub
+////////////////////////////////////////////////////////////////////////////////////////
+
+bool WioLTE::SetSSLCFG(const char* url)
+{
+	if (strncmp("https:", url, 6) == 0) {
+		if (_Module.WriteCommandAndWaitForResponse("AT+QHTTPCFG=\"sslctxid\",1"         , "OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+		if (_Module.WriteCommandAndWaitForResponse("AT+QSSLCFG=\"sslversion\",1,4"      , "OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+		if (_Module.WriteCommandAndWaitForResponse("AT+QSSLCFG=\"ciphersuite\",1,0XFFFF", "OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+		if (_Module.WriteCommandAndWaitForResponse("AT+QSSLCFG=\"seclevel\",1,0"        , "OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	}
+
+	return RET_OK(true);
+}
+
+bool WioLTE::IoTHubSend(const char* url, const char* data, const char* sas, int* responseCode)
+{
+	const char* parameter;
+	ArgumentParser parser;
+
+	if (_Module.WriteCommandAndWaitForResponse("AT+QHTTPCFG=\"requestheader\",1", "OK", 500) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	if (!HttpSetUrl(url)) return RET_ERR(-1, E_UNKNOWN);
+
+	const char* host;
+	int hostLength;
+	const char* uri;
+	int uriLength;
+	if (!SplitUrl(url, &host, &hostLength, &uri, &uriLength)) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder header;
+	header.Write("POST ");
+	if (uriLength <= 0) {
+		header.Write("/");
+	}
+	else {
+		header.Write(uri, uriLength);
+	}
+	header.Write(" HTTP/1.1\r\n");
+	header.Write("Host: ");
+	header.Write(host, hostLength);
+	header.Write("\r\n");
+	header.Write("Accept: */*\r\n");
+	header.Write("User-Agent: "HTTP_POST_USER_AGENT"\r\n");
+	header.Write("Connection: Keep-Alive\r\n");
+	header.WriteFormat("Authorization: %s\r\n",sas);
+	header.Write("Content-Type: "HTTP_POST_CONTENT_TYPE"\r\n");
+	if (!header.WriteFormat("Content-Length: %d\r\n", strlen(data))) return RET_ERR(-1, E_UNKNOWN); 
+	header.Write("\r\n");
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QHTTPPOST=%d", header.Length() + strlen(data))) return RET_ERR(-1, E_UNKNOWN);
+	_Module.WriteCommand(str.GetString());
+	if (_Module.WaitForResponse("CONNECT", 60000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	_Module.Write(header.GetString());
+	_Module.Write(data);
+	if (_Module.WaitForResponse("OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	if ((parameter = _Module.WaitForResponse(NULL, 60000, "+QHTTPPOST: ", (ModuleSerial::WaitForResponseFlag)(ModuleSerial::WFR_START_WITH | ModuleSerial::WFR_REMOVE_START_WITH))) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	parser.Parse(parameter);
+	if (parser.Size() < 1) return RET_ERR(-1, E_UNKNOWN);
+	if (strcmp(parser[0], "0") != 0) return RET_ERR(-1, E_UNKNOWN);
+	if (parser.Size() < 2) {
+		*responseCode = -1;
+	}
+	else {
+		*responseCode = atoi(parser[1]);
+	}
+
+	return RET_OK(true);
+}
+
+int WioLTE::IoTHubRecieve(const char* url, char* data, const char* sas, int dataSize)
+{
+	const char* parameter;
+	ArgumentParser parser;
+	char* str;
+
+	if (_Module.WriteCommandAndWaitForResponse("AT+QHTTPCFG=\"requestheader\",1", "OK", 10000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	if (_Module.WriteCommandAndWaitForResponse("AT+QHTTPCFG=\"responseheader\",1", "OK", 10000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	if (!HttpSetUrl(url)) return RET_ERR(-1, E_UNKNOWN);
+
+	const char* host;
+	int hostLength;
+	const char* uri;
+	int uriLength;
+	
+	if (!SplitUrl(url, &host, &hostLength, &uri, &uriLength)) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder header;
+	header.Write("GET ");
+
+	if (uriLength <= 0) {
+		header.Write("/");
+	}
+	else {
+		header.Write(uri, uriLength);
+	}
+
+	header.Write(" HTTP/1.1\r\n");
+	header.Write("Host: ");
+	header.Write(host, hostLength);
+	header.Write("\r\n");
+	header.WriteFormat("Authorization: %s\r\n",sas);
+	header.Write("\r\n\r\n");
+
+	StringBuilder strGet;
+	if (!strGet.WriteFormat("AT+QHTTPGET=80,%d", header.Length())) return RET_ERR(-1, E_UNKNOWN);
+	_Module.WriteCommand(strGet.GetString());
+	if (_Module.WaitForResponse("CONNECT", 60000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	_Module.Write(header.GetString());
+	if (_Module.WaitForResponse("OK", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	
+	if ((parameter = _Module.WaitForResponse(NULL, 60000, "+QHTTPGET: ", (ModuleSerial::WaitForResponseFlag)(ModuleSerial::WFR_START_WITH | ModuleSerial::WFR_REMOVE_START_WITH))) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	
+	parser.Parse(parameter);
+	if (parser.Size() < 1) return RET_ERR(-1, E_UNKNOWN);
+	if (strcmp(parser[0], "0") != 0) return RET_ERR(-1, E_UNKNOWN);
+	
+	int contentLength = parser.Size() >= 3 ? atoi(parser[2]) : -1;
+	
+	_Module.WriteCommand("AT+QHTTPREAD");
+	
+	if (_Module.WaitForResponse("CONNECT", 1000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	char res[512];
+
+	if (contentLength >= 0) {
+		
+		if (contentLength + 1 > dataSize) return RET_ERR(-1, E_UNKNOWN);
+		
+		_Module.Read((byte*)data, dataSize, 1000);
+		res[dataSize] = '\0';
+
+		if (strcmp(parser[1],"200")==0){
+
+			char tmp[512];
+			char* response[20];
+			char* etag;
+		
+			strcpy(tmp,data);
+
+			//SerialUSB.println(data);
+
+			response[0]=strtok(tmp,"\r\n");
+
+			for(int i=1;i<20;i++){
+				response[i]=strtok(NULL,"\r\n");
+			}
+		
+			etag=strtok(response[2],"\"");
+			etag=strtok(NULL,"\"");
+
+			String count=response[12];
+			int l=count.length();
+			count=count.substring(count.indexOf(":")+1,l);
+			int cnt=count.toInt();
+			
+			String HostStr=url;
+			int len=HostStr.length();
+			HostStr=HostStr.substring(HostStr.indexOf(":")+3,len);
+			String HostAddress=HostStr.substring(0,HostStr.indexOf("/"));
+			HostStr=HostStr.substring(HostStr.indexOf("/")+1,len);
+			String SendAddress="/"+HostStr.substring(0,HostStr.indexOf("?"))+"/";
+			String ApiVer=HostStr.substring(HostStr.indexOf("?"),len);
+
+			String delhost=SendAddress+etag+ApiVer;
+			
+			String delreq="DELETE "+delhost+" HTTP/1.1\r\n";
+			
+			delreq=delreq+"Host: "+HostAddress+"\r\n";
+			delreq=delreq+"Authorization:"+sas+"\r\n\r\n\r\n";
+
+			char buf[512];
+			delreq.toCharArray(buf,512);
+			
+			char address[512];
+			HostAddress.toCharArray(address,512);
+
+			int connectId=SocketSslOpen(address,443);
+			if (connectId<0){
+				SerialUSB.println("### Socket Open Error ###");
+			}
+
+			if (!SocketSslSend(connectId,buf)){
+				SerialUSB.println("### Socket Send Error ###");
+			}
+
+			if (!SocketSslClose(connectId)){
+				SerialUSB.println("### Socket Close Error ###");
+			}
+
+			/*
+			SerialUSB.println("------------------------");
+			SerialUSB.print(etag);
+			SerialUSB.print(" : ");
+			SerialUSB.print(cnt);
+			SerialUSB.print(" : ");
+			SerialUSB.println(response[14]);
+			SerialUSB.println("------------------------");
+			*/
+			
+			strcpy(data,response[14]);
+		}
+	}
+
+	return RET_OK(contentLength);
+
+}
+
+int WioLTE::SocketSslOpen(const char* host, int port)
+{
+	if (host == NULL || host[0] == '\0') return RET_ERR(-1, E_UNKNOWN);
+	if (port < 0 || 65535 < port) return RET_ERR(-1, E_UNKNOWN);
+
+	
+
+	bool connectIdUsed[CONNECT_ID_NUM];
+	for (int i = 0; i < CONNECT_ID_NUM; i++) connectIdUsed[i] = false;
+
+	_Module.WriteCommand("AT+QSSLSTATE");
+	const char* response;
+	ArgumentParser parser;
+	do {
+		if ((response = _Module.WaitForResponse("OK", 10000, "+QSSLSTATE: ", ModuleSerial::WFR_START_WITH)) == NULL) return RET_ERR(-1, E_UNKNOWN);
+		if (strncmp(response, "+QSSLSTATE: ", 10) == 0) {
+			parser.Parse(&response[10]);
+			if (parser.Size() >= 1) {
+				int connectId = atoi(parser[0]);
+				if (connectId < 0 || CONNECT_ID_NUM <= connectId) return RET_ERR(-1, E_UNKNOWN);
+				connectIdUsed[connectId] = true;
+			}
+		}
+
+	} while (strcmp(response, "OK") != 0);
+
+	int connectId;
+	for (connectId = 0; connectId < CONNECT_ID_NUM; connectId++) {
+		if (!connectIdUsed[connectId]) break;
+	}
+	if (connectId >= CONNECT_ID_NUM) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QSSLOPEN=1,1,%d,\"%s\",%d", connectId, host, port)) return RET_ERR(-1, E_UNKNOWN);
+	if (_Module.WriteCommandAndWaitForResponse(str.GetString(), "OK", 150000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	str.Clear();
+	if (!str.WriteFormat("+QSSLOPEN: %d,0", connectId)) return RET_ERR(-1, E_UNKNOWN);
+	if (_Module.WaitForResponse(str.GetString(), 150000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	return RET_OK(connectId);
+}
+
+bool WioLTE::SocketSslSend(int connectId, const byte* data, int dataSize)
+{
+	if (connectId >= CONNECT_ID_NUM) return RET_ERR(-1, E_UNKNOWN);
+	if (dataSize > 1460) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QSSLSEND=%d,%d", connectId, dataSize)) return RET_ERR(-1, E_UNKNOWN);
+	_Module.WriteCommand(str.GetString());
+	if (_Module.WaitForResponse(NULL, 500, "> ", ModuleSerial::WFR_WITHOUT_DELIM) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	_Module.Write(data, dataSize);
+	if (_Module.WaitForResponse("SEND OK", 5000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	return RET_OK(true);
+}
+
+bool WioLTE::SocketSslSend(int connectId, const char* data)
+{
+	return SocketSslSend(connectId, (const byte*)data, strlen(data));
+}
+
+int WioLTE::SocketSslReceive(int connectId, byte* data, int dataSize)
+{
+	if (connectId >= CONNECT_ID_NUM) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QIRD=%d,1460", connectId)) return RET_ERR(-1, E_UNKNOWN);
+	_Module.WriteCommand(str.GetString());
+	const char* parameter;
+	if ((parameter = _Module.WaitForResponse(NULL, 500, "+QIRD: ", ModuleSerial::WFR_START_WITH)) == NULL) return RET_ERR(-1, E_UNKNOWN);
+	int dataLength = atoi(&parameter[7]);
+	if (dataLength >= 1) {
+		if (dataLength > dataSize) return RET_ERR(-1, E_UNKNOWN);
+		if (_Module.Read(data, dataLength, 500) != dataLength) return RET_ERR(-1, E_UNKNOWN);
+	}
+	if (_Module.WaitForResponse("OK", 500) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	return RET_OK(dataLength);
+}
+
+int WioLTE::SocketSslReceive(int connectId, char* data, int dataSize)
+{
+	int dataLength = SocketSslReceive(connectId, (byte*)data, dataSize - 1);
+	if (dataLength >= 0) data[dataLength] = '\0';
+
+	return dataLength;
+}
+
+int WioLTE::SocketSslReceive(int connectId, byte* data, int dataSize, long timeout)
+{
+	Stopwatch sw;
+	sw.Start();
+	int dataLength;
+	while ((dataLength = SocketSslReceive(connectId, data, dataSize)) == 0) {
+		if (sw.ElapsedMilliseconds() >= timeout) return 0;
+		delay(POLLING_INTERVAL);
+	}
+	return dataLength;
+}
+
+int WioLTE::SocketSslReceive(int connectId, char* data, int dataSize, long timeout)
+{
+	Stopwatch sw;
+	sw.Start();
+	int dataLength;
+	while ((dataLength = SocketSslReceive(connectId, data, dataSize)) == 0) {
+		if (sw.ElapsedMilliseconds() >= timeout) return 0;
+		delay(POLLING_INTERVAL);
+	}
+	return dataLength;
+}
+
+
+bool WioLTE::SocketSslClose(int connectId)
+{
+	if (connectId >= CONNECT_ID_NUM) return RET_ERR(-1, E_UNKNOWN);
+
+	StringBuilder str;
+	if (!str.WriteFormat("AT+QSSLCLOSE=%d", connectId)) return RET_ERR(-1, E_UNKNOWN);
+	if (_Module.WriteCommandAndWaitForResponse(str.GetString(), "OK", 10000) == NULL) return RET_ERR(-1, E_UNKNOWN);
+
+	return RET_OK(true);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////
+

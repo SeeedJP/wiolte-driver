@@ -290,4 +290,17 @@ public:
 	int HttpGet(const char* url, char* data, int dataSize);
 	bool HttpPost(const char* url, const char* data, int* responseCode);
 
+	//IoTHub
+	bool SetSSLCFG(const char* url);
+	bool IoTHubSend(const char* url, const char* data, const char* sas , int* responseCode);
+	int IoTHubRecieve(const char* url, char* data, const char* sas, int dataSize);
+	int SocketSslOpen(const char* host, int port);
+	bool SocketSslSend(int connectId, const byte* data, int dataSize);
+	bool SocketSslSend(int connectId, const char* data);
+	int SocketSslReceive(int connectId, byte* data, int dataSize);
+	int SocketSslReceive(int connectId, char* data, int dataSize);
+	int SocketSslReceive(int connectId, byte* data, int dataSize, long timeout);
+	int SocketSslReceive(int connectId, char* data, int dataSize, long timeout);
+	bool SocketSslClose(int connectId);
+
 };
